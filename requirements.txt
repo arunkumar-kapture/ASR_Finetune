@@ -1,0 +1,17 @@
+torch
+torchvision
+torchaudio
+unsloth
+transformers
+trl
+peft
+datasets
+librosa
+huggingface_hub
+python-dotenv
+jiwer
+accelerate
+bitsandbytes
+protobuf==4.25.3
+wandb==0.26.1
+numpy==1.26.4
