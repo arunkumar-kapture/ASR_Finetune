@@ -9,10 +9,10 @@ import numpy as np
 import torch
 import psutil
 import wandb
+import jiwer
 from datasets import load_dataset, Audio
 from itertools import islice
 from unsloth import FastVisionModel, get_chat_template
-from unsloth.trainer import UnslothVisionDataCollator
 from transformers import TrainerCallback
 from trl import SFTTrainer, SFTConfig
 from typing import List, Dict
@@ -32,11 +32,11 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark  = True
+    torch.backends.cudnn.benchmark = True
 
 wandb.login(key=os.getenv("WB_API_KEY"))
 
-MODEL_PATH     = "unsloth/gemma-4-E4B-it"
+MODEL_PATH     = "unsloth/gemma-4-E2B"
 RUN_NAME       = "gemma4-asr-tamil-english-v1"
 LORA_PATH      = f"./{RUN_NAME}"
 TARGET_SR      = 16000
@@ -48,10 +48,10 @@ TRAIN_SAMPLES: Dict[str, int] = {
     "tamil":   18500,
     "english": 0,
 }
-# EVAL_SAMPLES: Dict[str, int] = {
-#     "tamil":   0,
-#     "english": 0,
-# }
+EVAL_SAMPLES: Dict[str, int] = {
+    "tamil":   20,
+    "english": 0,
+}
 
 use_bf16 = (
     torch.cuda.is_available()
@@ -63,9 +63,8 @@ gpu_vram_gb = (
     if torch.cuda.is_available() else 0
 )
 
-CPU_CORES = os.cpu_count() or 4
-print(f"GPU VRAM  : {gpu_vram_gb:.1f} GB")
-print(f"BF16      : {use_bf16}")
+print(f"GPU VRAM : {gpu_vram_gb:.1f} GB")
+print(f"BF16     : {use_bf16}")
 
 print("Loading the model...")
 model, processor = FastVisionModel.from_pretrained(
@@ -73,7 +72,7 @@ model, processor = FastVisionModel.from_pretrained(
     load_in_4bit=True,
     use_gradient_checkpointing="unsloth",
 )
-processor = get_chat_template(processor, "gemma-3")
+processor = get_chat_template(processor, "gemma-4")
 
 model = FastVisionModel.get_peft_model(
     model,
@@ -84,8 +83,7 @@ model = FastVisionModel.get_peft_model(
     r=32,
     lora_alpha=64,
     lora_dropout=0.1,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj"],
+    target_modules="all-linear",
 )
 model.print_trainable_parameters()
 
@@ -93,11 +91,11 @@ model.print_trainable_parameters()
 DISK_ROOT       = "./asr_data"
 TRAIN_AUDIO_DIR = os.path.join(DISK_ROOT, "train_wavs")
 TRAIN_JSONL     = os.path.join(DISK_ROOT, "train.jsonl")
-# EVAL_AUDIO_DIR  = os.path.join(DISK_ROOT, "eval_wavs")
-# EVAL_JSONL      = os.path.join(DISK_ROOT, "eval.jsonl")
+EVAL_AUDIO_DIR  = os.path.join(DISK_ROOT, "eval_wavs")
+EVAL_JSONL      = os.path.join(DISK_ROOT, "eval.jsonl")
 
 os.makedirs(TRAIN_AUDIO_DIR, exist_ok=True)
-# os.makedirs(EVAL_AUDIO_DIR,  exist_ok=True)
+os.makedirs(EVAL_AUDIO_DIR,  exist_ok=True)
 
 
 def log_ram(tag: str = "") -> None:
@@ -153,7 +151,6 @@ def process_stream_to_disk(
     skip_n: int = 0,
 ) -> List[Dict]:
     entries: List[Dict] = []
-
     stats = {
         "no_audio": 0,
         "empty_text": 0,
@@ -175,7 +172,6 @@ def process_stream_to_disk(
     for i, sample in enumerate(pbar):
         if len(entries) >= n_samples:
             break
-
         try:
             audio_info = sample.get("audio") or sample.get("audio_filepath")
             if audio_info is None:
@@ -223,9 +219,7 @@ def process_stream_to_disk(
 
             entries.append({"audio": wav_path, "text": text, "lang": lang.capitalize()})
             stats["success"] += 1
-
             pbar.set_postfix(saved=len(entries), skipped=i - len(entries))
-
             del array
 
         except Exception as e:
@@ -249,11 +243,6 @@ def save_jsonl(entries: List[Dict], path: str) -> None:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def load_jsonl(path: str) -> List[Dict]:
-    with open(path, "r", encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
-    
-
 print("Generating the dataset...")
 
 ds_ta_train = load_dataset(
@@ -262,16 +251,15 @@ ds_ta_train = load_dataset(
     streaming=True,
     trust_remote_code=True,
 )
-# ds_ta_eval = load_dataset(
-#     "ai4bharat/Kathbath", "tamil",
-#     split="valid",
-#     streaming=True,
-#     trust_remote_code=True,
-# )
-
+ds_ta_eval = load_dataset(
+    "ai4bharat/Kathbath", "tamil",
+    split="valid",
+    streaming=True,
+    trust_remote_code=True,
+)
 
 train_entries: List[Dict] = []
-# eval_entries:  List[Dict] = []
+eval_entries:  List[Dict] = []
 
 ta_train = process_stream_to_disk(
     ds_ta_train, "tamil", TRAIN_SAMPLES["tamil"],
@@ -279,77 +267,172 @@ ta_train = process_stream_to_disk(
 )
 save_jsonl(ta_train, TRAIN_JSONL)
 train_entries.extend(ta_train)
-del ta_train
+del ta_train, ds_ta_train
 free_memory()
 
-# ta_eval = process_stream_to_disk(
-#     ds_ta_eval, "tamil", EVAL_SAMPLES["tamil"],
-#     EVAL_AUDIO_DIR, "eval", "ta", shuffle_buffer=0
-# )
-# save_jsonl(ta_eval, EVAL_JSONL)
-# eval_entries.extend(ta_eval)
-# del ta_eval
-# free_memory()
-
-en_train = process_stream_to_disk(
-    load_dataset("ai4bharat/Svarah", split="test", streaming=True),
-    "english", TRAIN_SAMPLES["english"],
-    TRAIN_AUDIO_DIR, "train", "en",
-    skip_n=0,
-)
-save_jsonl(en_train, TRAIN_JSONL)
-train_entries.extend(en_train)
-del en_train
+if EVAL_SAMPLES["tamil"] > 0:
+    ta_eval = process_stream_to_disk(
+        ds_ta_eval, "tamil", EVAL_SAMPLES["tamil"],
+        EVAL_AUDIO_DIR, "eval", "ta", shuffle_buffer=0
+    )
+    save_jsonl(ta_eval, EVAL_JSONL)
+    eval_entries.extend(ta_eval)
+    del ta_eval
 free_memory()
+del ds_ta_eval
 
-# en_eval = process_stream_to_disk(
-#     load_dataset("ai4bharat/Svarah", split="test", streaming=True),
-#     "english", EVAL_SAMPLES["english"],
-#     EVAL_AUDIO_DIR, "eval", "en",
-#     shuffle_buffer=0,
-#     skip_n=TRAIN_SAMPLES["english"],
-# )
-# save_jsonl(en_eval, EVAL_JSONL)
-# eval_entries.extend(en_eval)
-# del en_eval
-# free_memory()
+if TRAIN_SAMPLES["english"] > 0:
+    en_train = process_stream_to_disk(
+        load_dataset("ai4bharat/Svarah", split="test", streaming=True),
+        "english", TRAIN_SAMPLES["english"],
+        TRAIN_AUDIO_DIR, "train", "en",
+        skip_n=0,
+    )
+    save_jsonl(en_train, TRAIN_JSONL)
+    train_entries.extend(en_train)
+    del en_train
+    free_memory()
 
 random.shuffle(train_entries)
-# eval_data = eval_entries
-
+eval_data = eval_entries
 
 print(f"Train size : {len(train_entries)}")
-# print(f"Eval  size : {len(eval_data)}")
+print(f"Eval  size : {len(eval_data)}")
 log_ram("After dataset build")
 
 INSTRUCTION = (
     "Transcribe the following audio accurately. "
     "Output only the transcription text, nothing else."
 )
-def convert_to_conversation(sample: Dict) -> Dict:
-    # audio_array, _ = sf.read(sample["audio"], dtype="float32")
- 
-    audio_array  = sample["audio"]
-    return {
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "audio", "audio": (audio_array, TARGET_SR)},
-                    {"type": "text",  "text": f"Language: {sample['lang']}\n{INSTRUCTION}"},
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": sample["text"]}],
-            },
-        ],
-        "length": int(len(audio_array) / TARGET_SR * 50) + len(sample["text"]),
-    }
 
 
-converted_train = [convert_to_conversation(s) for s in train_entries]
+class LazyASRDataset(torch.utils.data.Dataset):
+    def __init__(self, entries):
+        self.entries = entries
+
+    def __len__(self):
+        return len(self.entries)
+
+    def __getitem__(self, idx):
+        sample = self.entries[idx]
+        audio_array, _ = sf.read(sample["audio"], dtype="float32")
+        return {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio", "audio": (audio_array, TARGET_SR)},
+                        {"type": "text", "text": f"Language: {sample['lang']}\n{INSTRUCTION}"},
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": sample["text"]}],
+                },
+            ],
+            "length": int(len(audio_array) / TARGET_SR * 50) + len(sample["text"]),
+        }
+
+converted_train = LazyASRDataset(train_entries)
+converted_eval  = LazyASRDataset(eval_data)
 free_memory()
+
+class Gemma4AudioCollator:
+    def __init__(self, processor):
+        self.processor = processor
+
+    def __call__(self, samples: List[Dict]) -> Dict:
+        batch_input_ids      = []
+        batch_attention_mask = []
+        batch_mm_token_types = []
+        batch_input_features = []
+        batch_features_mask  = []
+        batch_labels         = []
+
+        for sample in samples:
+            messages   = sample["messages"]
+            audio_arr  = messages[0]["content"][0]["audio"][0]
+            lang_text  = messages[0]["content"][1]["text"]
+            transcript = messages[1]["content"][0]["text"]
+
+            full_messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio", "audio": (audio_arr, TARGET_SR)},
+                        {"type": "text",  "text": lang_text},
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": transcript}],
+                },
+            ]
+
+            full_text = self.processor.apply_chat_template(
+                full_messages,
+                add_generation_prompt=False,
+                tokenize=False,
+            )
+            encoded = self.processor(
+                text=full_text,
+                audio=audio_arr,
+                sampling_rate=TARGET_SR,
+                add_special_tokens=False,
+                return_tensors="pt",
+            )
+            input_ids = encoded["input_ids"][0]
+            user_messages = [full_messages[0]]
+            user_text = self.processor.apply_chat_template(
+                user_messages,
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+            user_encoded = self.processor(
+                text=user_text,
+                audio=audio_arr,
+                sampling_rate=TARGET_SR,
+                add_special_tokens=False,
+                return_tensors="pt",
+            )
+            user_len = user_encoded["input_ids"].shape[1]
+
+            labels = input_ids.clone()
+            labels[:user_len] = -100
+
+            batch_input_ids.append(input_ids)
+            batch_attention_mask.append(encoded["attention_mask"][0])
+            batch_mm_token_types.append(encoded["mm_token_type_ids"][0])
+            batch_input_features.append(encoded["input_features"][0])
+            batch_features_mask.append(encoded["input_features_mask"][0])
+            batch_labels.append(labels)
+
+        def pad_seq(seqs, pad_val=0):
+            max_len = max(s.shape[0] for s in seqs)
+            return torch.stack([
+                torch.nn.functional.pad(s, (0, max_len - s.shape[0]), value=pad_val)
+                for s in seqs
+            ])
+
+        max_feat_len = max(f.shape[0] for f in batch_input_features)
+        padded_features = torch.stack([
+            torch.nn.functional.pad(f, (0, 0, 0, max_feat_len - f.shape[0]))
+            for f in batch_input_features
+        ])
+        padded_feat_mask = torch.stack([
+            torch.nn.functional.pad(m, (0, max_feat_len - m.shape[0]))
+            for m in batch_features_mask
+        ])
+
+        return {
+            "input_ids":           pad_seq(batch_input_ids, pad_val=0),
+            "attention_mask":      pad_seq(batch_attention_mask, pad_val=0),
+            "mm_token_type_ids":   pad_seq(batch_mm_token_types, pad_val=0),
+            "input_features":      padded_features,
+            "input_features_mask": padded_feat_mask,
+            "labels":              pad_seq(batch_labels, pad_val=-100),
+        }
+
 
 class MakeEveryCheckpointInferableCallback(TrainerCallback):
     def __init__(self, base_model_path: str):
@@ -371,8 +454,6 @@ class MakeEveryCheckpointInferableCallback(TrainerCallback):
         return control
 
 
-# wer_metric = evaluate.load("wer")
-
 class WandbMetricsCallback(TrainerCallback):
     def __init__(self, processor, eval_samples: List[Dict], sample_size: int = 50):
         self.processor    = processor
@@ -391,72 +472,76 @@ class WandbMetricsCallback(TrainerCallback):
         stats["cpu/total_gb"] = vm.total / 1024**3
         return stats
 
-    # def compute_lang_wer(self, model) -> Dict:
-    #     if not self.eval_samples:
-    #         print("[WandbMetricsCallback] No eval samples — skipping WER computation.")
-    #         return {}
+    def compute_lang_wer(self, model) -> Dict:
+        if not self.eval_samples:
+            return {}
 
-    #     preds: Dict[str, List] = {}
-    #     refs:  Dict[str, List] = {}
+        preds: Dict[str, List] = {}
+        refs:  Dict[str, List] = {}
 
-    #     FastVisionModel.for_inference(model)
+        FastVisionModel.for_inference(model)
 
-    #     n = min(self.sample_size, len(self.eval_samples))
-    #     for sample in self.eval_samples[:n]:
-    #         lang = sample["lang"]
-    #         ref  = sample["text"]
-    #         audio_array, _ = sf.read(sample["audio"], dtype="float32")
+        n = min(self.sample_size, len(self.eval_samples))
+        for sample in self.eval_samples[:n]:
+            lang = sample["lang"]
+            ref  = sample["text"]
 
-    #         messages = [
-    #             {
-    #                 "role": "user",
-    #                 "content": [
-    #                     {"type": "audio", "audio": (audio_array, TARGET_SR)},
-    #                     {"type": "text",  "text": f"Language: {lang}\n{INSTRUCTION}"},
-    #                 ],
-    #             }
-    #         ]
-    #         input_text = self.processor.apply_chat_template(
-    #             messages, add_generation_prompt=True
-    #         )
-    #         inputs = self.processor(
-    #             text=input_text,
-    #             audio=audio_array,
-    #             sampling_rate=TARGET_SR,
-    #             add_special_tokens=False,
-    #             return_tensors="pt",
-    #         ).to("cuda")
+            audio_array, _ = sf.read(sample["audio"], dtype="float32")
 
-    #         with torch.no_grad():
-    #             out_ids = model.generate(
-    #                 **inputs,
-    #                 max_new_tokens=256,
-    #                 use_cache=True,
-    #                 temperature=1.0,
-    #                 top_p=0.95,
-    #                 top_k=64,
-    #             )
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio", "audio": (audio_array, TARGET_SR)},
+                        {"type": "text",  "text": f"Language: {lang}\n{INSTRUCTION}"},
+                    ],
+                }
+            ]
 
-    #         result = self.processor.decode(out_ids[0], skip_special_tokens=True)
-    #         preds.setdefault(lang, []).append(result)
-    #         refs.setdefault(lang,  []).append(ref)
+            input_text = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False,
+            )
+            inputs = self.processor(
+                text=input_text,
+                audio=audio_array,
+                sampling_rate=TARGET_SR,
+                add_special_tokens=False,
+                return_tensors="pt",
+            ).to("cuda")
 
-    #     FastVisionModel.for_training(model)
-    #     free_memory()
+            with torch.no_grad():
+                out_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=256,
+                    use_cache=True,
+                    temperature=1.0,
+                    top_p=0.95,
+                    top_k=64,
+                )
 
-    #     return {
-    #         f"wer/{lang}": wer_metric.compute(
-    #             predictions=preds[lang], references=refs[lang]
-    #         )
-    #         for lang in preds
-    #     }
+            result = self.processor.decode(out_ids[0], skip_special_tokens=True)
+            preds.setdefault(lang, []).append(result)
+            refs.setdefault(lang,  []).append(ref)
+
+            del audio_array, inputs, out_ids
+
+        FastVisionModel.for_training(model)
+        free_memory()
+
+        wer_results = {}
+        for lang in preds:
+            wer_val = jiwer.wer(refs[lang], preds[lang])
+            wer_results[f"eval/wer_{lang}"] = wer_val
+            print(f"[WER] {lang}: {wer_val:.4f}")
+
+        return wer_results
 
     def on_step_end(self, args, state, control, **kwargs):
         wandb.log(self.get_memory_stats(), step=state.global_step)
 
-    # def on_evaluate(self, args, state, control, **kwargs):
-    #     lang_metrics = self.compute_lang_wer(kwargs["model"])
-    #     wandb.log({**lang_metrics, **self.get_memory_stats()}, step=state.global_step)
+    def on_evaluate(self, args, state, control, **kwargs):
+        lang_metrics = self.compute_lang_wer(kwargs["model"])
+        wandb.log({**lang_metrics, **self.get_memory_stats()}, step=state.global_step)
 
 
 wandb.init(
@@ -471,29 +556,31 @@ wandb.init(
         "per_device_train_batch_size": 1,
         "gradient_accumulation_steps": 8,
         "num_train_epochs":            1,
-        "logging_steps":               200,
+        "logging_steps":               100,
         "save_steps":                  500,
+        "eval_steps":                  500,
         "save_total_limit":            4,
         "bf16":                        use_bf16,
-        "tf32":                        use_bf16,
         "lora_r":                      32,
         "lora_alpha":                  64,
         "lora_dropout":                0.1,
-        "dataloader_workers":          0,
         "train_samples":               len(train_entries),
         "train_samples_cfg":           TRAIN_SAMPLES,
+        "eval_samples":                len(eval_data),
     },
 )
 
 trainer = SFTTrainer(
     model=model,
     train_dataset=converted_train,
+    eval_dataset=converted_eval,
     processing_class=processor.tokenizer,
-    data_collator=UnslothVisionDataCollator(model, processor),
+    data_collator=Gemma4AudioCollator(processor),
     args=SFTConfig(
         output_dir=LORA_PATH,
 
         per_device_train_batch_size=3,
+        per_device_eval_batch_size=1,
         gradient_accumulation_steps=8,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
@@ -506,13 +593,15 @@ trainer = SFTTrainer(
         optim="adamw_8bit",
         weight_decay=0.001,
 
-        logging_steps=200,
+        logging_steps=50,
         logging_first_step=True,
 
+        eval_strategy="steps",
+        eval_steps=400,
+
         save_strategy="steps",
-        save_steps=500,
+        save_steps=300,
         save_total_limit=4,
-        save_safetensors=True,
 
         bf16=use_bf16,
         fp16=not use_bf16,
@@ -522,18 +611,13 @@ trainer = SFTTrainer(
         dataloader_num_workers=0,
         dataloader_pin_memory=False,
 
-        group_by_length=True,
-        length_column_name="length",
-
         torch_compile=False,
 
         remove_unused_columns=False,
         dataset_text_field="",
         dataset_kwargs={"skip_prepare_dataset": True},
-        max_length=2048,
 
         report_to="wandb",
-        include_tokens_per_second=True,
         include_num_input_tokens_seen=True,
 
         push_to_hub=True,
@@ -542,13 +626,18 @@ trainer = SFTTrainer(
     ),
     callbacks=[
         MakeEveryCheckpointInferableCallback(base_model_path=MODEL_PATH),
+        WandbMetricsCallback(
+            processor=processor,
+            eval_samples=eval_data,
+            sample_size=len(eval_data),
+        ),
     ],
 )
 
-print("Started training...")
+print("Started training...\n")
 trainer.train()
 
-print("Completed training and saving the adaptor...")
+print("Completed training and saving the adaptor...\n")
 if trainer.args.process_index == 0:
     final_adapter_dir = os.path.join(LORA_PATH, "final_lora_adapter")
     model.save_pretrained(final_adapter_dir)
