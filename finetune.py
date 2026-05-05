@@ -236,7 +236,6 @@ def process_stream_to_disk(
     log_ram(f"after {lang} {tag} ({len(entries)} saved)")
     return entries
 
-
 def save_jsonl(entries: List[Dict], path: str) -> None:
     with open(path, "a", encoding="utf-8") as f:
         for entry in entries:
@@ -300,10 +299,7 @@ print(f"Train size : {len(train_entries)}")
 print(f"Eval  size : {len(eval_data)}")
 log_ram("After dataset build")
 
-INSTRUCTION = (
-    "Transcribe the following audio accurately. "
-    "Output only the transcription text, nothing else."
-)
+INSTRUCTION = "Transcribe the following Tamil audio accurately. Output only the transcription text, nothing else."
 
 
 class LazyASRDataset(torch.utils.data.Dataset):
@@ -322,7 +318,7 @@ class LazyASRDataset(torch.utils.data.Dataset):
                     "role": "user",
                     "content": [
                         {"type": "audio", "audio": (audio_array, TARGET_SR)},
-                        {"type": "text", "text": f"Language: {sample['lang']}\n{INSTRUCTION}"},
+                        {"type": "text", "text": INSTRUCTION},
                     ],
                 },
                 {
@@ -352,6 +348,7 @@ class Gemma4AudioCollator:
         for sample in samples:
             messages   = sample["messages"]
             audio_arr  = messages[0]["content"][0]["audio"][0]
+            print(f"Audio array: {audio_arr}")
             lang_text  = messages[0]["content"][1]["text"]
             transcript = messages[1]["content"][0]["text"]
 
@@ -493,7 +490,7 @@ class WandbMetricsCallback(TrainerCallback):
                     "role": "user",
                     "content": [
                         {"type": "audio", "audio": (audio_array, TARGET_SR)},
-                        {"type": "text",  "text": f"Language: {lang}\n{INSTRUCTION}"},
+                        {"type": "text",  "text": INSTRUCTION},
                     ],
                 }
             ]
@@ -533,7 +530,6 @@ class WandbMetricsCallback(TrainerCallback):
             wer_val = jiwer.wer(refs[lang], preds[lang])
             wer_results[f"eval/wer_{lang}"] = wer_val
             print(f"[WER] {lang}: {wer_val:.4f}")
-
         return wer_results
 
     def on_step_end(self, args, state, control, **kwargs):
@@ -553,12 +549,12 @@ wandb.init(
         "learning_rate":               2e-4,
         "lr_scheduler_type":           "cosine",
         "warmup_ratio":                0.03,
-        "per_device_train_batch_size": 1,
+        "per_device_train_batch_size": 3,
         "gradient_accumulation_steps": 8,
         "num_train_epochs":            1,
-        "logging_steps":               100,
-        "save_steps":                  500,
-        "eval_steps":                  500,
+        "logging_steps":               50,
+        "save_steps":                  300,
+        "eval_steps":                  400,
         "save_total_limit":            4,
         "bf16":                        use_bf16,
         "lora_r":                      32,
@@ -614,6 +610,7 @@ trainer = SFTTrainer(
         torch_compile=False,
 
         remove_unused_columns=False,
+        max_length=2048,
         dataset_text_field="",
         dataset_kwargs={"skip_prepare_dataset": True},
 
