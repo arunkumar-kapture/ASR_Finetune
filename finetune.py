@@ -554,7 +554,7 @@ wandb.init(
         "num_train_epochs":            1,
         "logging_steps":               50,
         "save_steps":                  300,
-        "eval_steps":                  400,
+        "eval_steps":                  300,
         "save_total_limit":            4,
         "bf16":                        use_bf16,
         "lora_r":                      32,
@@ -586,14 +586,16 @@ trainer = SFTTrainer(
 
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
-        optim="adamw_8bit",
+        optim="paged_adamw_8bit",
         weight_decay=0.001,
 
         logging_steps=50,
         logging_first_step=True,
 
         eval_strategy="steps",
-        eval_steps=400,
+        eval_steps=300,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
 
         save_strategy="steps",
         save_steps=300,
@@ -619,7 +621,7 @@ trainer = SFTTrainer(
 
         push_to_hub=True,
         hub_model_id="ArunK-2003/Gemma4FT_v0",
-        hub_strategy="every_save",
+        hub_strategy="checkpoint",
     ),
     callbacks=[
         MakeEveryCheckpointInferableCallback(base_model_path=MODEL_PATH),
