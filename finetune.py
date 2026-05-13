@@ -36,7 +36,7 @@ if torch.cuda.is_available():
 
 wandb.login(key=os.getenv("WB_API_KEY"))
 
-MODEL_PATH     = "unsloth/gemma-4-E2B"
+MODEL_PATH     = "unsloth/gemma-4-E4B"
 RUN_NAME       = "gemma4-asr-tamil-english-v1"
 LORA_PATH      = f"./{RUN_NAME}"
 TARGET_SR      = 16000
