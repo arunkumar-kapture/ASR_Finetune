@@ -139,6 +139,7 @@ def decode_audio(audio_info):
     else:
         raise ValueError(f"Unknown audio format: {type(audio_info)}")
 
+
 def safe_write_wav(path: str, array: np.ndarray, sr: int, retries: int = 3) -> bool:
     for attempt in range(retries):
         try:
