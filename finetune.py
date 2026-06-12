@@ -29,6 +29,7 @@ except Exception as e:
     print(f"HF login error: {e}")
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["DATASETS_AUDIO_BACKEND"] = "soundfile"
 
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -50,7 +51,7 @@ TRAIN_SAMPLES: Dict[str, int] = {
     "english": 0,
 }
 EVAL_SAMPLES: Dict[str, int] = {
-    "tamil":   30,
+    "tamil":   400,
     "english": 0,
 }
 
@@ -262,8 +263,7 @@ print("Generating the dataset...\n")
 ds_ta_train = load_dataset(
     "ai4bharat/Kathbath", "tamil",
     split="train",
-    streaming=True,
-    trust_remote_code=True,
+    streaming=True
 )
 ds_ta_eval = load_dataset(
     "ai4bharat/Kathbath", "tamil",
@@ -484,11 +484,11 @@ wandb.init(
         "lr_scheduler_type":           "cosine",
         "warmup_ratio":                0.03,
         "per_device_train_batch_size": 3,
-        "gradient_accumulation_steps": 8,
+        "gradient_accumulation_steps": 5,
         "num_train_epochs":            1,
         "logging_steps":               50,
-        "save_steps":                  400,
-        "eval_steps":                  400,
+        "save_steps":                  300,
+        "eval_steps":                  300,
         "save_total_limit":            4,
         "bf16":                        use_bf16,
         "lora_r":                      32,
@@ -509,9 +509,10 @@ trainer = SFTTrainer(
     args=SFTConfig(
         output_dir=LORA_PATH,
 
+        num_train_epochs=1,
         per_device_train_batch_size=3,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=8,
+        gradient_accumulation_steps=5,
         warmup_ratio=0.03,
         learning_rate=2e-4,
 
@@ -523,10 +524,10 @@ trainer = SFTTrainer(
         logging_first_step=True,
 
         eval_strategy="steps",
-        eval_steps=400,
+        eval_steps=300,
 
         save_strategy="steps",
-        save_steps=400,
+        save_steps=300,
         save_total_limit=4,
 
         bf16=use_bf16,
@@ -540,6 +541,7 @@ trainer = SFTTrainer(
         dataset_kwargs={"skip_prepare_dataset": True},
         max_length=8192,
         load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
 
         report_to="wandb",
 
