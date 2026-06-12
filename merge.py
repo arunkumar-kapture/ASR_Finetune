@@ -11,10 +11,10 @@ import torch.nn as nn
 load_dotenv()
 login(token=os.getenv("HF_TOKEN"))
 
-MERGED_DIR  = "gemma4-asr-tamil-merged"
-ADAPTER_DIR = "./gemma4-asr-tamil-v1"
-HF_REPO     = "ArunK-2003/Gemma4_Tamil_FT"
-BASE_MODEL  = "google/gemma-4-e4b-it"
+MERGED_DIR  = ""
+ADAPTER_DIR = ""
+HF_REPO     = ""
+BASE_MODEL  = ""
 
 shutil.rmtree(MERGED_DIR, ignore_errors=True)
 
