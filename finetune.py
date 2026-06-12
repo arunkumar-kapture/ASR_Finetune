@@ -518,7 +518,7 @@ trainer = SFTTrainer(
 
         lr_scheduler_type="cosine",
         optim="adamw_8bit",
-        weight_decay=0.001,
+        weight_decay=0.01,
 
         logging_steps=50,
         logging_first_step=True,
